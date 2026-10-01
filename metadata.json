@@ -1,0 +1,6 @@
+{
+  "name": "Hệ thống Quản lý và Chấm Sáng Kiến",
+  "description": "Hệ thống quản lý toàn diện quy trình đăng ký, tiếp nhận, xét duyệt, chấm điểm hội đồng và công nhận sáng kiến cấp cơ sở và cấp bộ/ngành.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
