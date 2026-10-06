@@ -7,19 +7,53 @@ import React, { useState, useEffect } from 'react';
 import { 
   LayoutDashboard, FileText, Calendar, Users, Award, BookOpen, 
   BarChart3, Settings, ShieldCheck, CheckCircle2, Clock, AlertCircle,
-  Plus, Search, Filter, Eye, Edit, Trash2, Send, Lock, Unlock, 
+  Plus, Search, Filter, Eye, Edit, Trash2, Send, Lock, Unlock, Download,
   CheckSquare, UserCheck, FileCheck, Building2, Bell, LogOut, ChevronRight,
   TrendingUp, Layers, Check, X, AlertTriangle, RefreshCw, Key, UserPlus, UserMinus, Upload, Trophy, Paperclip
 } from 'lucide-react';
 
+async function readApiResponse(response: Response) {
+  const body = await response.text();
+  let data: any;
+  try {
+    data = body ? JSON.parse(body) : null;
+  } catch {
+    throw new Error(`Phản hồi từ máy chủ không hợp lệ (HTTP ${response.status}). Hãy khởi động lại server rồi thử lại.`);
+  }
+  if (!response.ok) throw new Error(data?.error || `Yêu cầu thất bại (HTTP ${response.status}).`);
+  if (data === null) throw new Error(`Máy chủ trả về nội dung rỗng (HTTP ${response.status}).`);
+  return data;
+}
+
+const ROLE_PERMISSION_OPTIONS = [
+  { code: 'view_dashboard', name: 'Xem tổng quan' },
+  { code: 'view_innovations', name: 'Xem sáng kiến' },
+  { code: 'view_rounds', name: 'Xem đợt xét' },
+  { code: 'view_repository', name: 'Tra cứu sáng kiến' },
+  { code: 'submit_innovation', name: 'Nộp sáng kiến' },
+  { code: 'manage_users', name: 'Quản lý người dùng' },
+  { code: 'manage_departments', name: 'Quản lý đơn vị' },
+  { code: 'manage_councils', name: 'Quản lý hội đồng' },
+  { code: 'manage_rounds', name: 'Quản lý đợt xét' },
+  { code: 'manage_assignments', name: 'Phân công chấm' },
+  { code: 'score_assigned', name: 'Chấm sáng kiến được giao' },
+  { code: 'view_all_scores', name: 'Xem toàn bộ điểm trong phạm vi' },
+  { code: 'manage_criteria', name: 'Quản lý bộ tiêu chí' },
+  { code: 'manage_ranking', name: 'Quản lý quy tắc xếp loại' },
+  { code: 'manage_fields', name: 'Quản lý lĩnh vực' },
+  { code: 'view_audit', name: 'Xem nhật ký' },
+];
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [users, setUsers] = useState<any[]>([]);
+  const [roleCatalog, setRoleCatalog] = useState<any[]>([]);
   const [departments, setDepartments] = useState<any[]>([]);
   const [councils, setCouncils] = useState<any[]>([]);
   const [criteriaSets, setCriteriaSets] = useState<any[]>([]);
   const [evaluationRounds, setEvaluationRounds] = useState<any[]>([]);
   const [innovations, setInnovations] = useState<any[]>([]);
+  const [innovationFields, setInnovationFields] = useState<any[]>([]);
   const [assignments, setAssignments] = useState<any[]>([]);
   const [scoringSheets, setScoringSheets] = useState<any[]>([]);
   const [dashboardStats, setDashboardStats] = useState<any>({});
@@ -29,9 +63,35 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [loading, setLoading] = useState(true);
   const [notificationMsg, setNotificationMsg] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [loginForm, setLoginForm] = useState({ username: 'admin', password: '123456' });
+  const [loginError, setLoginError] = useState('');
 
   // Modal states
+  const [showDepartmentModal, setShowDepartmentModal] = useState(false);
+  const [editingDepartment, setEditingDepartment] = useState<any>(null);
+  const [departmentForm, setDepartmentForm] = useState({ code: 'XP-A', name: 'UBND Xã Phường A', type: 'XA_PHUONG', parentId: '' });
+  const [editingInnovationField, setEditingInnovationField] = useState<any>(null);
+  const [showInnovationFieldModal, setShowInnovationFieldModal] = useState(false);
+  const [innovationFieldForm, setInnovationFieldForm] = useState({ name: '' });
+
+  const [showUserModal, setShowUserModal] = useState(false);
+  const [editingUser, setEditingUser] = useState<any>(null);
+  const [userForm, setUserForm] = useState({
+    username: 'user_new',
+    password: '123456',
+    fullName: 'Người dùng mới',
+    email: '',
+    phone: '',
+    departmentId: '',
+    position: '',
+    roles: ['SUBMITTER'] as string[]
+  });
+  const [showRoleModal, setShowRoleModal] = useState(false);
+  const [editingRole, setEditingRole] = useState<any>(null);
+  const [roleForm, setRoleForm] = useState({ code: '', name: '', description: '', permissions: [] as string[] });
   const [showCreateRoundModal, setShowCreateRoundModal] = useState(false);
+  const [editingRound, setEditingRound] = useState<any>(null);
   const [showCreateInnovationModal, setShowCreateInnovationModal] = useState(false);
   const [showScoringModal, setShowScoringModal] = useState(false);
   const [selectedInnovationForScoring, setSelectedInnovationForScoring] = useState<any>(null);
@@ -79,7 +139,7 @@ export default function App() {
   const [innovForm, setInnovForm] = useState({
     evaluationRoundId: '',
     title: '',
-    field: 'Cải cách hành chính',
+    field: '',
     solutionDescription: '',
     applyingOrganization: 'UBND Xã Phường A',
     author2UserId: '',
@@ -93,13 +153,19 @@ export default function App() {
   const [recommendation, setRecommendation] = useState('RECOGNIZED');
 
   useEffect(() => {
-    fetchAllData();
+    fetch('/api/session').then(async response => {
+      if (!response.ok) throw new Error('No active session');
+      const data = await response.json();
+      setCurrentUser(data.user);
+      setIsLoggedIn(true);
+      await fetchAllData();
+    }).catch(() => setLoading(false));
   }, []);
 
   const fetchAllData = async () => {
     setLoading(true);
     try {
-      const [uRes, dRes, cRes, csRes, erRes, iRes, saRes, ssRes, statRes, rrRes, alRes] = await Promise.all([
+      const [uRes, dRes, cRes, csRes, erRes, iRes, saRes, ssRes, statRes, rrRes, alRes, ifRes, rolesRes] = await Promise.all([
         fetch('/api/users').then(r => r.json()),
         fetch('/api/departments').then(r => r.json()),
         fetch('/api/councils').then(r => r.json()),
@@ -111,15 +177,18 @@ export default function App() {
         fetch('/api/dashboard/stats').then(r => r.json()),
         fetch('/api/ranking-rules').then(r => r.json()),
         fetch('/api/audit-logs').then(r => r.json()),
+        fetch('/api/innovation-fields').then(r => r.json()),
+        fetch('/api/roles').then(r => r.json()),
       ]);
 
       setUsers(uRes);
-      if (!currentUser && uRes.length > 0) setCurrentUser(uRes[0]);
       setDepartments(dRes);
       setCouncils(cRes);
       setCriteriaSets(csRes);
       setEvaluationRounds(erRes);
       setInnovations(iRes);
+      setInnovationFields(ifRes);
+      setRoleCatalog(rolesRes);
       setAssignments(saRes);
       setScoringSheets(ssRes);
       setDashboardStats(statRes);
@@ -129,7 +198,14 @@ export default function App() {
       if (cRes.length > 0) setRoundForm(prev => ({ ...prev, councilId: cRes[0].id }));
       if (csRes.length > 0) setRoundForm(prev => ({ ...prev, criteriaSetId: csRes[0].id }));
       if (dRes.length > 0) setRoundForm(prev => ({ ...prev, departmentId: dRes[0].id }));
-      if (erRes.length > 0) setInnovForm(prev => ({ ...prev, evaluationRoundId: erRes[0].id }));
+      const openRounds = erRes.filter((round: any) => round.status === 'SCORING' && !round.isScoringFinalized);
+      setInnovForm(prev => ({
+        ...prev,
+        evaluationRoundId: openRounds.some((round: any) => round.id === prev.evaluationRoundId)
+          ? prev.evaluationRoundId
+          : openRounds[0]?.id || '',
+      }));
+      if (ifRes.length > 0) setInnovForm(prev => ({ ...prev, field: ifRes.some((field: any) => field.name === prev.field) ? prev.field : ifRes[0].name }));
     } catch (err) {
       console.error(err);
       showNotification('Lỗi tải dữ liệu', 'error');
@@ -141,6 +217,147 @@ export default function App() {
   const showNotification = (text: string, type: 'success' | 'error') => {
     setNotificationMsg({ text, type });
     setTimeout(() => setNotificationMsg(null), 4000);
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(loginForm)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Đăng nhập thất bại');
+      setCurrentUser(data.user);
+      setIsLoggedIn(true);
+      setLoginError('');
+      await fetchAllData();
+      showNotification('Đăng nhập thành công!', 'success');
+    } catch (err: any) {
+      setLoginError(err.message);
+    }
+  };
+
+  const handleLogout = () => {
+    fetch('/api/logout', { method: 'POST' }).catch(() => undefined);
+    setCurrentUser(null);
+    setIsLoggedIn(false);
+    setActiveTab('dashboard');
+  };
+
+  const handleSaveDepartment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const url = editingDepartment ? `/api/departments/${editingDepartment.id}` : '/api/departments';
+      const method = editingDepartment ? 'PUT' : 'POST';
+      const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(departmentForm) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Lỗi lưu đơn vị');
+      showNotification('Lưu đơn vị thành công!', 'success');
+      setShowDepartmentModal(false);
+      setEditingDepartment(null);
+      fetchAllData();
+    } catch (err: any) { showNotification(err.message, 'error'); }
+  };
+
+  const handleDeleteDepartment = async (id: string) => {
+    if (!confirm('Xóa đơn vị này?')) return;
+    try {
+      const res = await fetch(`/api/departments/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Xóa đơn vị thất bại');
+      showNotification('Đã xóa đơn vị', 'success');
+      fetchAllData();
+    } catch (err: any) { showNotification(err.message, 'error'); }
+  };
+
+  const handleSaveInnovationField = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try {
+      const response = await fetch(editingInnovationField ? `/api/innovation-fields/${editingInnovationField.id}` : '/api/innovation-fields', {
+        method: editingInnovationField ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(innovationFieldForm),
+      });
+      await readApiResponse(response);
+      const fieldsResponse = await fetch('/api/innovation-fields');
+      const fields = await readApiResponse(fieldsResponse);
+      setInnovationFields(fields);
+      setInnovForm(current => ({ ...current, field: fields.some((field: any) => field.name === current.field) ? current.field : fields[0]?.name || '' }));
+      setShowInnovationFieldModal(false);
+      setEditingInnovationField(null);
+      showNotification('Đã lưu lĩnh vực.', 'success');
+    } catch (err: any) { showNotification(err.message, 'error'); }
+  };
+
+  const handleDeleteInnovationField = async (field: any) => {
+    if (!confirm(`Xóa lĩnh vực "${field.name}"?`)) return;
+    try {
+      const response = await fetch(`/api/innovation-fields/${field.id}`, { method: 'DELETE' });
+      await readApiResponse(response);
+      const fieldsResponse = await fetch('/api/innovation-fields');
+      const fields = await readApiResponse(fieldsResponse);
+      setInnovationFields(fields);
+      setInnovForm(current => ({ ...current, field: fields.some((item: any) => item.name === current.field) ? current.field : fields[0]?.name || '' }));
+      showNotification('Đã xóa lĩnh vực.', 'success');
+    } catch (err: any) { showNotification(err.message, 'error'); }
+  };
+
+  const handleSaveUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const url = editingUser ? `/api/users/${editingUser.id}` : '/api/users';
+      const method = editingUser ? 'PUT' : 'POST';
+      const body = {
+        ...userForm,
+        roles: userForm.roles
+      };
+      const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Lỗi lưu người dùng');
+      showNotification(editingUser ? 'Cập nhật người dùng thành công!' : 'Thêm người dùng thành công!', 'success');
+      setShowUserModal(false);
+      setEditingUser(null);
+      fetchAllData();
+    } catch (err: any) { showNotification(err.message, 'error'); }
+  };
+
+  const handleSaveRole = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try {
+      const response = await fetch(editingRole ? `/api/roles/${editingRole.code}` : '/api/roles', {
+        method: editingRole ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(roleForm),
+      });
+      await readApiResponse(response);
+      const rolesResponse = await fetch('/api/roles');
+      setRoleCatalog(await readApiResponse(rolesResponse));
+      setShowRoleModal(false);
+      setEditingRole(null);
+      showNotification('Đã lưu vai trò và quyền.', 'success');
+    } catch (error: any) { showNotification(error.message, 'error'); }
+  };
+
+  const handleDeleteRole = async (role: any) => {
+    if (!confirm(`Xóa vai trò "${role.name}"?`)) return;
+    try {
+      const response = await fetch(`/api/roles/${role.code}`, { method: 'DELETE' });
+      await readApiResponse(response);
+      const rolesResponse = await fetch('/api/roles');
+      setRoleCatalog(await readApiResponse(rolesResponse));
+      showNotification('Đã xóa vai trò.', 'success');
+    } catch (error: any) { showNotification(error.message, 'error'); }
+  };
+
+  const handleDeleteUser = async (id: string) => {
+    if (!confirm('Xóa người dùng này?')) return;
+    try {
+      const res = await fetch(`/api/users/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Xóa người dùng thất bại');
+      showNotification('Đã xóa người dùng', 'success');
+      fetchAllData();
+    } catch (err: any) { showNotification(err.message, 'error'); }
   };
 
   const handleSaveCriteriaSet = async (e: React.FormEvent) => {
@@ -245,16 +462,77 @@ export default function App() {
     } catch (err: any) { showNotification(err.message, 'error'); }
   };
 
-  const handleCreateRound = async (e: React.FormEvent) => {
+  const handleCreateScoringAssignment = async (payload: any) => {
+    const innovationIds = payload.innovationIds || [payload.innovationId].filter(Boolean);
+    const userIds = payload.userIds || [payload.userId].filter(Boolean);
+    let created = 0;
+    let skipped = 0;
+    let excludedParticipants = 0;
+
+    for (const innovationId of innovationIds) {
+      const innovation = innovations.find((item: any) => item.id === innovationId);
+      for (const userId of userIds) {
+        const isParticipant = innovation?.submitterId === userId || innovation?.authors?.some((author: any) => author.userId === userId);
+        if (isParticipant) {
+          excludedParticipants++;
+          continue;
+        }
+
+        const response = await fetch('/api/scoring-assignments', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            evaluationRoundId: payload.evaluationRoundId,
+            innovationId,
+            userId,
+            deadline: payload.deadline,
+          })
+        });
+        if (response.status === 409) {
+          await response.text();
+          skipped++;
+          continue;
+        }
+        await readApiResponse(response);
+        created++;
+      }
+    }
+
+    const assignmentRes = await fetch('/api/scoring-assignments');
+    setAssignments(await readApiResponse(assignmentRes));
+    const result = { created, skipped, excludedParticipants };
+    showNotification(`Đã giao ${created} lượt; bỏ qua ${skipped} lượt trùng và ${excludedParticipants} lượt có tác giả/người nộp.`, 'success');
+    return result;
+  };
+
+  const handleSaveRound = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const deptId = currentUser.roles?.includes('WARD_ADMIN') ? currentUser.departmentId : roundForm.departmentId;
-      const payload = { ...roundForm, departmentId: deptId };
-
-      const res = await fetch('/api/evaluation-rounds', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      if (!res.ok) throw new Error('Lỗi tạo đợt');
-      showNotification('Tạo đợt xét cho đơn vị thành công!', 'success');
+      const editing = Boolean(editingRound);
+      const payload = editing
+        ? { code: roundForm.code, name: roundForm.name, year: roundForm.year, description: roundForm.description }
+        : { ...roundForm, departmentId: currentUser.roles?.includes('ADMIN') ? roundForm.departmentId : currentUser.departmentId };
+      const response = await fetch(editing ? `/api/evaluation-rounds/${editingRound.id}` : '/api/evaluation-rounds', {
+        method: editing ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || (editing ? 'Lỗi sửa đợt xét.' : 'Lỗi tạo đợt xét.'));
+      showNotification(editing ? 'Đã cập nhật đợt xét.' : 'Tạo đợt xét cho đơn vị thành công!', 'success');
       setShowCreateRoundModal(false);
+      setEditingRound(null);
+      fetchAllData();
+    } catch (err: any) { showNotification(err.message, 'error'); }
+  };
+
+  const handleDeleteRound = async (round: any) => {
+    if (!confirm(`Xóa đợt "${round.name}"? Toàn bộ sáng kiến, phân công và phiếu chấm trong đợt này cũng sẽ bị xóa.`)) return;
+    try {
+      const response = await fetch(`/api/evaluation-rounds/${round.id}`, { method: 'DELETE' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Không thể xóa đợt xét.');
+      showNotification('Đã xóa đợt xét và dữ liệu liên quan.', 'success');
       fetchAllData();
     } catch (err: any) { showNotification(err.message, 'error'); }
   };
@@ -375,17 +653,62 @@ export default function App() {
     } catch (err: any) { showNotification(err.message, 'error'); }
   };
 
-  if (loading) {
+  if (!isLoggedIn || !currentUser) {
     return (
-      <div className="flex h-screen items-center justify-center bg-gray-50 text-gray-700">
-        <div className="text-center"><RefreshCw className="w-10 h-10 animate-spin mx-auto text-indigo-600 mb-3" /><p>Đang tải...</p></div>
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center px-4">
+        <div className="w-full max-w-md rounded-3xl border border-slate-800 bg-slate-900/80 p-8 shadow-2xl backdrop-blur-sm">
+          <div className="flex items-center justify-center mb-6">
+            <div className="bg-indigo-600 p-3 rounded-2xl text-white"><Award className="w-7 h-7" /></div>
+          </div>
+          <h1 className="text-2xl font-bold text-white text-center mb-2">Đăng nhập</h1>
+          <p className="text-sm text-slate-400 text-center mb-6">Hệ thống Quản lý và Chấm Sáng Kiến</p>
+
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">Tên đăng nhập</label>
+              <input
+                type="text"
+                value={loginForm.username}
+                onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
+                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                placeholder="admin"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">Mật khẩu</label>
+              <input
+                type="password"
+                value={loginForm.password}
+                onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
+                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                placeholder="123456"
+                required
+              />
+            </div>
+
+            {loginError && (
+              <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+                {loginError}
+              </div>
+            )}
+
+            <button type="submit" className="w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-500 transition">
+              {loading ? 'Đang tải...' : 'Đăng nhập'}
+            </button>
+          </form>
+
+          <div className="mt-6 rounded-xl border border-slate-700 bg-slate-950/50 p-3 text-xs text-slate-400">
+            Tài khoản demo: <span className="font-semibold text-slate-200">admin</span> / <span className="font-semibold text-slate-200">123456</span>
+          </div>
+        </div>
       </div>
     );
   }
 
-  const myDepartmentRounds = currentUser?.roles?.includes('WARD_ADMIN') 
-    ? evaluationRounds.filter(er => er.departmentId === currentUser.departmentId)
-    : evaluationRounds;
+  const hasCurrentPermission = (permission: string) => currentUser?.roles?.includes('ADMIN') || roleCatalog.some((role: any) => currentUser?.roles?.includes(role.code) && (role.permissions?.includes('*') || role.permissions?.includes(permission)));
+  const myDepartmentRounds = evaluationRounds;
+  const openInnovationRounds = evaluationRounds.filter((round: any) => round.status === 'SCORING' && !round.isScoringFinalized);
 
   return (
     <div className="min-h-screen bg-gray-100 font-sans flex flex-col">
@@ -405,17 +728,17 @@ export default function App() {
             <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-inner"><Award className="w-6 h-6" /></div>
             <div>
               <h1 className="font-bold text-lg leading-tight">HỆ THỐNG QUẢN LÝ VÀ CHẤM SÁNG KIẾN</h1>
-              <p className="text-xs text-slate-400">Phân quyền Quản trị Xã Phường & Huyện</p>
+              <p className="text-xs text-slate-400">Quản lý các xã, phường trực thuộc</p>
             </div>
           </div>
           <div className="flex items-center space-x-4">
-            <select 
-              className="bg-slate-800 text-sm font-semibold text-indigo-300 rounded-lg px-3 py-1.5 border border-slate-700 focus:outline-none"
-              value={currentUser?.id}
-              onChange={(e) => { const u = users.find(x => x.id === e.target.value); if (u) setCurrentUser(u); }}
-            >
-              {users.map(u => <option key={u.id} value={u.id} className="bg-slate-900 text-white">{u.fullName} ({u.roles.join(', ')})</option>)}
-            </select>
+            <div className="text-right">
+              <p className="text-sm font-semibold text-white">{currentUser.fullName}</p>
+              <p className="text-[11px] text-slate-400">{currentUser.roles.join(', ')}</p>
+            </div>
+            <button onClick={handleLogout} className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700">
+              <LogOut className="w-4 h-4" /> Đăng xuất
+            </button>
           </div>
         </div>
       </header>
@@ -428,37 +751,141 @@ export default function App() {
             
             <SidebarItem icon={<LayoutDashboard className="w-4 h-4" />} label="1. Tổng quan" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
             <SidebarItem icon={<FileText className="w-4 h-4" />} label="2. Sáng kiến (Tối đa 3 tác giả)" active={activeTab === 'innovations'} onClick={() => setActiveTab('innovations')} />
-            <SidebarItem icon={<Calendar className="w-4 h-4" />} label="3. Đợt xét (Xã & Huyện)" active={activeTab === 'rounds'} onClick={() => setActiveTab('rounds')} />
+            <SidebarItem icon={<Calendar className="w-4 h-4" />} label="3. Đợt xét (Xã/Phường)" active={activeTab === 'rounds'} onClick={() => setActiveTab('rounds')} />
             <SidebarItem icon={<Users className="w-4 h-4" />} label="4. Hội đồng xét duyệt" active={activeTab === 'councils'} onClick={() => setActiveTab('councils')} />
             <SidebarItem icon={<CheckSquare className="w-4 h-4" />} label="5. Chấm điểm Hội đồng" active={activeTab === 'scoring'} onClick={() => setActiveTab('scoring')} />
             <SidebarItem icon={<Trophy className="w-4 h-4" />} label="6. Xếp loại & Thống kê" active={activeTab === 'ranking'} onClick={() => setActiveTab('ranking')} />
             <SidebarItem icon={<BookOpen className="w-4 h-4" />} label="7. Kho sáng kiến" active={activeTab === 'repository'} onClick={() => setActiveTab('repository')} />
 
             <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider px-3 mt-6 mb-2">Quản trị</p>
-            <SidebarItem icon={<Building2 className="w-4 h-4" />} label="8. Quản lý Đơn vị" active={activeTab === 'departments'} onClick={() => setActiveTab('departments')} />
-            <SidebarItem icon={<Users className="w-4 h-4" />} label="9. Quản lý User (Admin Xã)" active={activeTab === 'users'} onClick={() => setActiveTab('users')} />
-            <SidebarItem icon={<CheckSquare className="w-4 h-4" />} label="10. Quản lý Bộ tiêu chí" active={activeTab === 'criteria'} onClick={() => setActiveTab('criteria')} />
-            <SidebarItem icon={<Award className="w-4 h-4" />} label="11. Cấu hình Xếp loại" active={activeTab === 'ranking-config'} onClick={() => setActiveTab('ranking-config')} />
-            <SidebarItem icon={<ShieldCheck className="w-4 h-4" />} label="12. Nhật ký Audit" active={activeTab === 'admin'} onClick={() => setActiveTab('admin')} />
+            {hasCurrentPermission('manage_departments') && <SidebarItem icon={<Building2 className="w-4 h-4" />} label="8. Quản lý Đơn vị" active={activeTab === 'departments'} onClick={() => setActiveTab('departments')} />}
+            {hasCurrentPermission('manage_fields') && <SidebarItem icon={<Layers className="w-4 h-4" />} label="Quản lý lĩnh vực" active={activeTab === 'innovation-fields'} onClick={() => setActiveTab('innovation-fields')} />}
+            {currentUser?.roles?.includes('ADMIN') && <SidebarItem icon={<ShieldCheck className="w-4 h-4" />} label="Vai trò & quyền" active={activeTab === 'roles'} onClick={() => setActiveTab('roles')} />}
+            {hasCurrentPermission('manage_users') && <SidebarItem icon={<Users className="w-4 h-4" />} label="9. Quản lý User" active={activeTab === 'users'} onClick={() => setActiveTab('users')} />}
+            {hasCurrentPermission('manage_criteria') && <SidebarItem icon={<CheckSquare className="w-4 h-4" />} label="10. Quản lý Bộ tiêu chí" active={activeTab === 'criteria'} onClick={() => setActiveTab('criteria')} />}
+            {hasCurrentPermission('manage_ranking') && <SidebarItem icon={<Award className="w-4 h-4" />} label="11. Cấu hình Xếp loại" active={activeTab === 'ranking-config'} onClick={() => setActiveTab('ranking-config')} />}
+            {hasCurrentPermission('view_audit') && <SidebarItem icon={<ShieldCheck className="w-4 h-4" />} label="12. Nhật ký Audit" active={activeTab === 'admin'} onClick={() => setActiveTab('admin')} />}
           </nav>
         </aside>
 
         <main className="flex-1 bg-white rounded-2xl shadow-sm border border-slate-200 p-6 overflow-y-auto">
           {activeTab === 'dashboard' && <DashboardView stats={dashboardStats} evaluationRounds={myDepartmentRounds} innovations={innovations} />}
-          {activeTab === 'innovations' && <InnovationsView innovations={innovations} onOpenCreate={() => setShowCreateInnovationModal(true)} />}
-          {activeTab === 'rounds' && <RoundsView evaluationRounds={myDepartmentRounds} councils={councils} criteriaSets={criteriaSets} currentUser={currentUser} onOpenCreate={() => setShowCreateRoundModal(true)} onFinalize={handleFinalizeScoring} />}
-          {activeTab === 'councils' && <CouncilsView councils={councils} users={users} onOpenAdd={() => { setEditingCouncil(null); setCouncilForm({code:'HD-2026', name:'Hội đồng mới', decisionNumber:'01/QĐ', decisionDate:'2026-01-01'}); setShowCouncilModal(true); }} onEdit={(c: any) => { setEditingCouncil(c); setCouncilForm(c); setShowCouncilModal(true); }} onDelete={handleDeleteCouncil} onOpenMembers={(c: any) => { setSelectedCouncilForMembers(c); setShowCouncilMembersModal(true); }} />}
-          {activeTab === 'scoring' && <ScoringView evaluationRounds={myDepartmentRounds} assignments={assignments} currentUser={currentUser} councils={councils} scoringSheets={scoringSheets} onOpenScoring={openScoringModal} />}
-          {activeTab === 'ranking' && <RankingView innovations={innovations} rankingRules={rankingRules} />}
+          {activeTab === 'innovations' && <InnovationsView innovations={innovations} evaluationRounds={evaluationRounds} canSubmit={hasCurrentPermission('submit_innovation')} onOpenCreate={() => setShowCreateInnovationModal(true)} />}
+          {activeTab === 'rounds' && <RoundsView evaluationRounds={myDepartmentRounds} councils={councils} criteriaSets={criteriaSets} currentUser={currentUser} canManage={hasCurrentPermission('manage_rounds')} onOpenCreate={() => { setEditingRound(null); setRoundForm({ code: 'DOT-XAI-2026', name: 'Đợt xét sáng kiến tại đơn vị', year: 2026, departmentId: departments.find((department: any) => department.type === 'XA_PHUONG')?.id || '', councilId: councils[0]?.id || '', criteriaSetId: criteriaSets[0]?.id || '', description: 'Đợt xét' }); setShowCreateRoundModal(true); }} onEdit={(round: any) => { setEditingRound(round); setRoundForm({ code: round.code, name: round.name, year: round.year, departmentId: round.departmentId, councilId: round.councilId, criteriaSetId: round.criteriaSetId, description: round.description || '' }); setShowCreateRoundModal(true); }} onDelete={handleDeleteRound} onFinalize={handleFinalizeScoring} />}
+          {activeTab === 'councils' && <CouncilsView councils={councils} users={users} canManage={hasCurrentPermission('manage_councils')} onOpenAdd={() => { setEditingCouncil(null); setCouncilForm({code:'HD-2026', name:'Hội đồng mới', decisionNumber:'01/QĐ', decisionDate:'2026-01-01'}); setShowCouncilModal(true); }} onEdit={(c: any) => { setEditingCouncil(c); setCouncilForm(c); setShowCouncilModal(true); }} onDelete={handleDeleteCouncil} onOpenMembers={(c: any) => { setSelectedCouncilForMembers(c); setShowCouncilMembersModal(true); }} />}
+          {activeTab === 'scoring' && <ScoringView evaluationRounds={myDepartmentRounds} assignments={assignments} currentUser={currentUser} canManageAssignments={hasCurrentPermission('manage_assignments')} canViewAllScores={hasCurrentPermission('view_all_scores')} councils={councils} innovations={innovations} scoringSheets={scoringSheets} onOpenScoring={openScoringModal} onCreateAssignment={handleCreateScoringAssignment} onFinalize={handleFinalizeScoring} />}
+          {activeTab === 'ranking' && <RankingView innovations={innovations} rankingRules={rankingRules} evaluationRounds={myDepartmentRounds} />}
           {activeTab === 'repository' && <RepositoryView innovations={innovations} />}
           
-          {activeTab === 'ranking-config' && <RankingConfigView rankingRules={rankingRules} onOpenAdd={() => { setEditingRankingRule(null); setRankingForm({minScore: 80, maxScore: 90, rankName: 'Loại 2', badgeColor: 'bg-emerald-100 text-emerald-800'}); setShowRankingModal(true); }} onEdit={(r: any) => { setEditingRankingRule(r); setRankingForm(r); setShowRankingModal(true); }} onDelete={handleDeleteRankingRule} />}
-          {activeTab === 'departments' && <DepartmentsView departments={departments} />}
-          {activeTab === 'users' && <UsersManagementView users={users} departments={departments} />}
-          {activeTab === 'criteria' && <CriteriaManagementView criteriaSets={criteriaSets} onOpenAdd={() => { setEditingCriteriaSet(null); setCriteriaSetForm({code:'TC-NEW', name:'Bộ tiêu chí mới', description:'', totalScore:100, criteria:[{code:'C1', name:'Tính mới', maxScore:50, weight:0.5, description:''}, {code:'C2', name:'Hiệu quả', maxScore:50, weight:0.5, description:''}]}); setShowCriteriaSetModal(true); }} onEdit={(cs: any) => { setEditingCriteriaSet(cs); setCriteriaSetForm(cs); setShowCriteriaSetModal(true); }} onDelete={handleDeleteCriteriaSet} />}
-          {activeTab === 'admin' && <AdminView auditLogs={auditLogs} />}
+          {activeTab === 'ranking-config' && hasCurrentPermission('manage_ranking') && <RankingConfigView rankingRules={rankingRules} onOpenAdd={() => { setEditingRankingRule(null); setRankingForm({minScore: 80, maxScore: 90, rankName: 'Loại 2', badgeColor: 'bg-emerald-100 text-emerald-800'}); setShowRankingModal(true); }} onEdit={(r: any) => { setEditingRankingRule(r); setRankingForm(r); setShowRankingModal(true); }} onDelete={handleDeleteRankingRule} />}
+          {activeTab === 'departments' && hasCurrentPermission('manage_departments') && <DepartmentsView departments={departments} canManage={hasCurrentPermission('manage_departments')} onOpenAdd={() => { setEditingDepartment(null); setDepartmentForm({ code: '', name: '', type: 'XA_PHUONG', parentId: '' }); setShowDepartmentModal(true); }} onEdit={(dept: any) => { setEditingDepartment(dept); setDepartmentForm({ code: dept.code, name: dept.name, type: dept.type, parentId: dept.parentId || '' }); setShowDepartmentModal(true); }} onDelete={handleDeleteDepartment} />}
+          {activeTab === 'innovation-fields' && hasCurrentPermission('manage_fields') && <InnovationFieldsView fields={innovationFields} onAdd={() => { setEditingInnovationField(null); setInnovationFieldForm({ name: '' }); setShowInnovationFieldModal(true); }} onEdit={(field: any) => { setEditingInnovationField(field); setInnovationFieldForm({ name: field.name }); setShowInnovationFieldModal(true); }} onDelete={handleDeleteInnovationField} />}
+          {activeTab === 'roles' && currentUser?.roles?.includes('ADMIN') && <RolesManagementView roles={roleCatalog} onAdd={() => { setEditingRole(null); setRoleForm({ code: '', name: '', description: '', permissions: [] }); setShowRoleModal(true); }} onEdit={(role: any) => { setEditingRole(role); setRoleForm({ code: role.code, name: role.name, description: role.description || '', permissions: role.permissions?.filter((permission: string) => permission !== '*') || [] }); setShowRoleModal(true); }} onDelete={handleDeleteRole} />}
+          {activeTab === 'users' && hasCurrentPermission('manage_users') && <UsersManagementView users={users} departments={departments} roleCatalog={roleCatalog} onOpenAdd={() => { setEditingUser(null); setUserForm({ username: '', password: '123456', fullName: '', email: '', phone: '', departmentId: departments[0]?.id || '', position: '', roles: ['SUBMITTER'] }); setShowUserModal(true); }} onEdit={(user: any) => { setEditingUser(user); setUserForm({ username: user.username, password: user.password || '123456', fullName: user.fullName, email: user.email || '', phone: user.phone || '', departmentId: user.departmentId || '', position: user.position || '', roles: Array.isArray(user.roles) ? user.roles : [user.roles || 'SUBMITTER'] }); setShowUserModal(true); }} onDelete={handleDeleteUser} />}
+          {activeTab === 'criteria' && hasCurrentPermission('manage_criteria') && <CriteriaManagementView criteriaSets={criteriaSets} onOpenAdd={() => { setEditingCriteriaSet(null); setCriteriaSetForm({code:'TC-NEW', name:'Bộ tiêu chí mới', description:'', totalScore:100, criteria:[{code:'C1', name:'Tính mới', maxScore:50, weight:0.5, description:''}, {code:'C2', name:'Hiệu quả', maxScore:50, weight:0.5, description:''}]}); setShowCriteriaSetModal(true); }} onEdit={(cs: any) => { setEditingCriteriaSet(cs); setCriteriaSetForm(cs); setShowCriteriaSetModal(true); }} onDelete={handleDeleteCriteriaSet} />}
+          {activeTab === 'admin' && hasCurrentPermission('view_audit') && <AdminView auditLogs={auditLogs} />}
         </main>
       </div>
+
+      {showDepartmentModal && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6">
+            <h3 className="text-lg font-bold text-slate-900 mb-4">{editingDepartment ? 'Sửa đơn vị' : 'Thêm đơn vị mới'}</h3>
+            <form onSubmit={handleSaveDepartment} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Mã đơn vị</label>
+                <input type="text" className="w-full border rounded-lg px-3 py-2 text-sm" value={departmentForm.code} onChange={e => setDepartmentForm({ ...departmentForm, code: e.target.value })} required />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Tên đơn vị</label>
+                <input type="text" className="w-full border rounded-lg px-3 py-2 text-sm" value={departmentForm.name} onChange={e => setDepartmentForm({ ...departmentForm, name: e.target.value })} required />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Loại đơn vị</label>
+                <select className="w-full border rounded-lg px-3 py-2 text-sm" value={departmentForm.type} onChange={e => setDepartmentForm({ ...departmentForm, type: e.target.value, parentId: e.target.value === 'XA_PHUONG' ? '' : departmentForm.parentId })}>
+                  <option value="XA_PHUONG">Xã / Phường</option>
+                  <option value="PHONG_BAN_XA_PHUONG">Phòng thuộc xã / phường</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Xã / phường trực thuộc</label>
+                <select className="w-full border rounded-lg px-3 py-2 text-sm disabled:bg-slate-100 disabled:text-slate-500" value={departmentForm.parentId} onChange={e => setDepartmentForm({ ...departmentForm, parentId: e.target.value })} disabled={departmentForm.type === 'XA_PHUONG'} required={departmentForm.type === 'PHONG_BAN_XA_PHUONG'}>
+                  <option value="">{departmentForm.type === 'XA_PHUONG' ? 'Xã / phường là đơn vị gốc' : 'Chọn xã / phường quản lý phòng này'}</option>
+                  {departments.filter((dept: any) => dept.id !== editingDepartment?.id && dept.type === 'XA_PHUONG').map((dept: any) => (
+                    <option key={dept.id} value={dept.id}>{dept.name}</option>
+                  ))}
+                </select>
+                {departmentForm.type === 'PHONG_BAN_XA_PHUONG' && !departments.some((dept: any) => dept.type === 'XA_PHUONG') && <p className="mt-1 text-xs text-rose-600">Chưa có xã / phường. Hãy tạo xã / phường trước khi thêm phòng ban.</p>}
+              </div>
+              <div className="flex justify-end space-x-2 pt-4">
+                <button type="button" onClick={() => setShowDepartmentModal(false)} className="px-4 py-2 border rounded-lg text-sm">Hủy</button>
+                <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold">Lưu</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showUserModal && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6">
+            <h3 className="text-lg font-bold text-slate-900 mb-4">{editingUser ? 'Sửa người dùng' : 'Thêm người dùng'}</h3>
+            <form onSubmit={handleSaveUser} className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Tên đăng nhập</label>
+                  <input type="text" className="w-full border rounded-lg px-3 py-2 text-sm" value={userForm.username} onChange={e => setUserForm({ ...userForm, username: e.target.value })} required />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Mật khẩu</label>
+                  <input type="text" className="w-full border rounded-lg px-3 py-2 text-sm" value={userForm.password} onChange={e => setUserForm({ ...userForm, password: e.target.value })} required />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Họ tên</label>
+                <input type="text" className="w-full border rounded-lg px-3 py-2 text-sm" value={userForm.fullName} onChange={e => setUserForm({ ...userForm, fullName: e.target.value })} required />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Email</label>
+                  <input type="email" className="w-full border rounded-lg px-3 py-2 text-sm" value={userForm.email} onChange={e => setUserForm({ ...userForm, email: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Số điện thoại</label>
+                  <input type="text" className="w-full border rounded-lg px-3 py-2 text-sm" value={userForm.phone} onChange={e => setUserForm({ ...userForm, phone: e.target.value })} />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Đơn vị</label>
+                  <select className="w-full border rounded-lg px-3 py-2 text-sm" value={userForm.departmentId} onChange={e => setUserForm({ ...userForm, departmentId: e.target.value })}>
+                    <option value="">-- Chọn đơn vị --</option>
+                    {departments.map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <p className="mb-2 text-xs font-semibold text-slate-600">Vai trò và quyền được cấp</p>
+                  <div className="grid max-h-44 grid-cols-1 gap-2 overflow-y-auto rounded-lg border border-slate-200 p-3 sm:grid-cols-2">
+                    {roleCatalog.filter((role: any) => role.code !== 'ADMIN' || currentUser?.roles?.includes('ADMIN')).map((role: any) => <label key={role.code} className="flex items-start gap-2 text-xs text-slate-700">
+                      <input type="checkbox" checked={userForm.roles.includes(role.code)} onChange={e => setUserForm({ ...userForm, roles: e.target.checked ? [...userForm.roles, role.code] : userForm.roles.filter((code: string) => code !== role.code) })} />
+                      <span><strong>{role.name}</strong><span className="block text-slate-500">{role.description}</span></span>
+                    </label>)}
+                    {!roleCatalog.length && <p className="text-xs text-slate-500">Chưa có vai trò để chọn.</p>}
+                  </div>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Chức vụ</label>
+                <input type="text" className="w-full border rounded-lg px-3 py-2 text-sm" value={userForm.position} onChange={e => setUserForm({ ...userForm, position: e.target.value })} />
+              </div>
+              <div className="flex justify-end space-x-2 pt-4">
+                <button type="button" onClick={() => setShowUserModal(false)} className="px-4 py-2 border rounded-lg text-sm">Hủy</button>
+                <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold">Lưu</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* --- MODALS --- */}
       {/* Criteria Set Modal */}
@@ -541,6 +968,55 @@ export default function App() {
         </div>
       )}
 
+      {showInnovationFieldModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <form onSubmit={handleSaveInnovationField} className="w-full max-w-md space-y-4 rounded-xl bg-white p-6 shadow-2xl">
+            <h3 className="text-lg font-bold text-slate-900">{editingInnovationField ? 'Sửa lĩnh vực' : 'Thêm lĩnh vực'}</h3>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-600">Tên lĩnh vực</label>
+              <input autoFocus className="w-full rounded-lg border px-3 py-2 text-sm" value={innovationFieldForm.name} onChange={e => setInnovationFieldForm({ name: e.target.value })} required />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => { setShowInnovationFieldModal(false); setEditingInnovationField(null); }} className="rounded-lg border px-4 py-2 text-sm">Hủy</button>
+              <button type="submit" className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700">Lưu</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {showRoleModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <form onSubmit={handleSaveRole} className="max-h-[90vh] w-full max-w-2xl space-y-4 overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+            <h3 className="text-lg font-bold text-slate-900">{editingRole ? 'Cấu hình vai trò' : 'Tạo vai trò'}</h3>
+            {!editingRole && <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-600">Mã vai trò</label>
+              <input className="w-full rounded-lg border px-3 py-2 text-sm uppercase" value={roleForm.code} onChange={e => setRoleForm({ ...roleForm, code: e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '_') })} placeholder="VD: REVIEWER" required />
+            </div>}
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-600">Tên vai trò</label>
+              <input className="w-full rounded-lg border px-3 py-2 text-sm" value={roleForm.name} onChange={e => setRoleForm({ ...roleForm, name: e.target.value })} required />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-600">Mô tả</label>
+              <textarea className="w-full rounded-lg border px-3 py-2 text-sm" rows={2} value={roleForm.description} onChange={e => setRoleForm({ ...roleForm, description: e.target.value })} />
+            </div>
+            <fieldset>
+              <legend className="mb-2 text-xs font-semibold text-slate-600">Quyền được cấp</legend>
+              <div className="grid max-h-64 grid-cols-1 gap-2 overflow-y-auto rounded-lg border border-slate-200 p-3 sm:grid-cols-2">
+                {ROLE_PERMISSION_OPTIONS.map(permission => <label key={permission.code} className="flex items-start gap-2 text-xs text-slate-700">
+                  <input type="checkbox" checked={roleForm.permissions.includes(permission.code)} onChange={e => setRoleForm({ ...roleForm, permissions: e.target.checked ? [...roleForm.permissions, permission.code] : roleForm.permissions.filter(code => code !== permission.code) })} />
+                  {permission.name}
+                </label>)}
+              </div>
+            </fieldset>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => { setShowRoleModal(false); setEditingRole(null); }} className="rounded-lg border px-4 py-2 text-sm">Hủy</button>
+              <button type="submit" className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700">Lưu quyền</button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Create Innovation Modal - With Max 3 Authors and Real File Uploads */}
       {showCreateInnovationModal && (
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -549,13 +1025,21 @@ export default function App() {
             <form onSubmit={handleCreateInnovation} className="space-y-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-600 mb-1">Đợt xét</label>
-                <select className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={innovForm.evaluationRoundId} onChange={e => setInnovForm({...innovForm, evaluationRoundId: e.target.value})}>
-                  {evaluationRounds.map(er => <option key={er.id} value={er.id}>{er.name} ({er.department?.name})</option>)}
+                <select className="w-full border rounded-lg px-3 py-2 text-sm bg-white disabled:bg-slate-100" value={innovForm.evaluationRoundId} onChange={e => setInnovForm({...innovForm, evaluationRoundId: e.target.value})} required disabled={!openInnovationRounds.length}>
+                  <option value="">{openInnovationRounds.length ? 'Chọn đợt xét đang mở' : 'Hiện không có đợt xét đang mở'}</option>
+                  {openInnovationRounds.map((er: any) => <option key={er.id} value={er.id}>{er.name} ({er.department?.name})</option>)}
                 </select>
               </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-600 mb-1">Tên sáng kiến</label>
                 <input type="text" className="w-full border rounded-lg px-3 py-2 text-sm" value={innovForm.title} onChange={e => setInnovForm({...innovForm, title: e.target.value})} required placeholder="Nhập tiêu đề sáng kiến..." />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Lĩnh vực</label>
+                <select className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={innovForm.field} onChange={e => setInnovForm({ ...innovForm, field: e.target.value })} required disabled={!innovationFields.length}>
+                  <option value="">{innovationFields.length ? 'Chọn lĩnh vực' : 'Chưa có lĩnh vực được cấu hình'}</option>
+                  {innovationFields.map((field: any) => <option key={field.id} value={field.name}>{field.name}</option>)}
+                </select>
               </div>
               
               <div className="p-3 bg-slate-50 border rounded-xl space-y-3">
@@ -609,7 +1093,7 @@ export default function App() {
 
               <div className="flex justify-end space-x-2 pt-2">
                 <button type="button" onClick={() => setShowCreateInnovationModal(false)} className="px-4 py-2 border rounded-lg text-sm">Hủy</button>
-                <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700">Nộp hồ sơ sáng kiến</button>
+                <button type="submit" disabled={!openInnovationRounds.length} className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed">Nộp hồ sơ sáng kiến</button>
               </div>
             </form>
           </div>
@@ -619,18 +1103,23 @@ export default function App() {
       {showCreateRoundModal && (
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full p-6">
-            <h3 className="text-lg font-bold text-slate-900 mb-4">Tạo Đợt Xét Mới cho Đơn vị / Xã Phường</h3>
-            <form onSubmit={handleCreateRound} className="space-y-4">
+            <h3 className="text-lg font-bold text-slate-900 mb-4">{editingRound ? 'Sửa đợt xét' : 'Tạo Đợt Xét Mới cho Đơn vị / Xã Phường'}</h3>
+            <form onSubmit={handleSaveRound} className="space-y-4">
               <div><label className="block text-xs font-semibold text-slate-600 mb-1">Mã đợt</label><input type="text" className="w-full border rounded-lg px-3 py-2 text-sm" value={roundForm.code} onChange={e => setRoundForm({...roundForm, code: e.target.value})} required /></div>
               <div><label className="block text-xs font-semibold text-slate-600 mb-1">Tên đợt xét</label><input type="text" className="w-full border rounded-lg px-3 py-2 text-sm" value={roundForm.name} onChange={e => setRoundForm({...roundForm, name: e.target.value})} required /></div>
-              {!currentUser?.roles?.includes('WARD_ADMIN') && (
-                <div><label className="block text-xs font-semibold text-slate-600 mb-1">Đơn vị / Xã Phường</label><select className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={roundForm.departmentId} onChange={e => setRoundForm({...roundForm, departmentId: e.target.value})}>{departments.map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}</select></div>
-              )}
               <div className="grid grid-cols-2 gap-4">
-                <div><label className="block text-xs font-semibold text-slate-600 mb-1">Hội Đồng</label><select className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={roundForm.councilId} onChange={e => setRoundForm({...roundForm, councilId: e.target.value})}>{councils.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
-                <div><label className="block text-xs font-semibold text-slate-600 mb-1">Bộ Tiêu Chí</label><select className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={roundForm.criteriaSetId} onChange={e => setRoundForm({...roundForm, criteriaSetId: e.target.value})}>{criteriaSets.map(cs => <option key={cs.id} value={cs.id}>{cs.name}</option>)}</select></div>
+                <div><label className="block text-xs font-semibold text-slate-600 mb-1">Năm</label><input type="number" min="2000" max="2100" className="w-full border rounded-lg px-3 py-2 text-sm" value={roundForm.year} onChange={e => setRoundForm({...roundForm, year: Number(e.target.value)})} required /></div>
+                {!editingRound && currentUser?.roles?.includes('ADMIN') && (
+                <div><label className="block text-xs font-semibold text-slate-600 mb-1">Đơn vị / Xã Phường</label><select className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={roundForm.departmentId} onChange={e => setRoundForm({...roundForm, departmentId: e.target.value})}>{departments.map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}</select></div>
+                )}
               </div>
-              <div className="flex justify-end space-x-2 pt-4"><button type="button" onClick={() => setShowCreateRoundModal(false)} className="px-4 py-2 border rounded-lg text-sm">Hủy</button><button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold">Tạo đợt xét</button></div>
+              {!editingRound && <div className="grid grid-cols-2 gap-4">
+                <div><label className="block text-xs font-semibold text-slate-600 mb-1">Hội Đồng</label><select className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={roundForm.councilId} onChange={e => setRoundForm({...roundForm, councilId: e.target.value})} required>{councils.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+                <div><label className="block text-xs font-semibold text-slate-600 mb-1">Bộ Tiêu Chí</label><select className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={roundForm.criteriaSetId} onChange={e => setRoundForm({...roundForm, criteriaSetId: e.target.value})} required>{criteriaSets.map(cs => <option key={cs.id} value={cs.id}>{cs.name}</option>)}</select></div>
+              </div>
+              }
+              <div><label className="block text-xs font-semibold text-slate-600 mb-1">Mô tả</label><textarea className="w-full border rounded-lg px-3 py-2 text-sm" value={roundForm.description} onChange={e => setRoundForm({...roundForm, description: e.target.value})} rows={2} /></div>
+              <div className="flex justify-end space-x-2 pt-4"><button type="button" onClick={() => { setShowCreateRoundModal(false); setEditingRound(null); }} className="px-4 py-2 border rounded-lg text-sm">Hủy</button><button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold">{editingRound ? 'Lưu thay đổi' : 'Tạo đợt xét'}</button></div>
             </form>
           </div>
         </div>
@@ -763,7 +1252,22 @@ function StatCard({ title, value, icon, bg }: any) {
   );
 }
 
-function InnovationsView({ innovations, onOpenCreate }: any) {
+function InnovationsView({ innovations, evaluationRounds, canSubmit, onOpenCreate }: any) {
+  const [selectedRoundId, setSelectedRoundId] = useState('');
+  const [selectedYear, setSelectedYear] = useState('');
+  const [titleQuery, setTitleQuery] = useState('');
+  const [authorQuery, setAuthorQuery] = useState('');
+  const years: number[] = Array.from(new Set<number>(evaluationRounds.map((round: any) => Number(round.year)).filter((year: number) => Number.isFinite(year)))).sort((a: number, b: number) => b - a);
+  const normalizeSearch = (value: any) => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[đĐ]/g, 'd').toLocaleLowerCase('vi');
+  const filteredInnovations = innovations.filter((innovation: any) => {
+    const round = evaluationRounds.find((item: any) => item.id === innovation.evaluationRoundId);
+    const authors = [...(innovation.authors || []).map((author: any) => author.fullName), innovation.submitter?.fullName].filter(Boolean).join(' ');
+    return (!selectedRoundId || innovation.evaluationRoundId === selectedRoundId) &&
+      (!selectedYear || String(round?.year) === selectedYear) &&
+      normalizeSearch(innovation.title).includes(normalizeSearch(titleQuery)) &&
+      normalizeSearch(authors).includes(normalizeSearch(authorQuery));
+  });
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -771,9 +1275,27 @@ function InnovationsView({ innovations, onOpenCreate }: any) {
           <h2 className="text-xl font-bold text-slate-900">Quản lý Sáng kiến (Tối đa 3 tác giả & File đính kèm)</h2>
           <p className="text-xs text-slate-500 mt-0.5">Hiển thị danh sách tác giả đầy đủ và các tài liệu đính kèm báo cáo.</p>
         </div>
-        <button onClick={onOpenCreate} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 flex items-center gap-2">
+        {canSubmit && <button onClick={onOpenCreate} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 flex items-center gap-2">
           <Upload className="w-4 h-4" /> Nộp sáng kiến mới
-        </button>
+        </button>}
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+        <select className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white" value={selectedRoundId} onChange={e => setSelectedRoundId(e.target.value)}>
+          <option value="">Tất cả đợt xét</option>
+          {evaluationRounds.map((round: any) => <option key={round.id} value={round.id}>{round.name}</option>)}
+        </select>
+        <select className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white" value={selectedYear} onChange={e => setSelectedYear(e.target.value)}>
+          <option value="">Tất cả năm</option>
+          {years.map((year: number) => <option key={year} value={year}>{year}</option>)}
+        </select>
+        <label className="flex items-center gap-2 border border-slate-300 rounded-lg px-3 bg-white">
+          <Search className="w-4 h-4 text-slate-400" />
+          <input className="min-w-0 w-full py-2 text-sm outline-none" value={titleQuery} onChange={e => setTitleQuery(e.target.value)} placeholder="Tìm tên sáng kiến" />
+        </label>
+        <label className="flex items-center gap-2 border border-slate-300 rounded-lg px-3 bg-white">
+          <Search className="w-4 h-4 text-slate-400" />
+          <input className="min-w-0 w-full py-2 text-sm outline-none" value={authorQuery} onChange={e => setAuthorQuery(e.target.value)} placeholder="Tìm theo tác giả" />
+        </label>
       </div>
       <div className="border rounded-2xl overflow-hidden bg-white shadow-xs">
         <table className="w-full text-left border-collapse">
@@ -786,7 +1308,7 @@ function InnovationsView({ innovations, onOpenCreate }: any) {
             </tr>
           </thead>
           <tbody className="divide-y text-sm text-slate-700">
-            {innovations.map((inv: any) => (
+            {filteredInnovations.map((inv: any) => (
               <tr key={inv.id} className="hover:bg-slate-50">
                 <td className="p-4">
                   <span className="font-semibold text-slate-900 block">{inv.title}</span>
@@ -816,6 +1338,7 @@ function InnovationsView({ innovations, onOpenCreate }: any) {
                 </td>
               </tr>
             ))}
+            {!filteredInnovations.length && <tr><td colSpan={4} className="p-8 text-center text-sm text-slate-500">Không tìm thấy sáng kiến phù hợp với bộ lọc.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -823,15 +1346,75 @@ function InnovationsView({ innovations, onOpenCreate }: any) {
   );
 }
 
-function RoundsView({ evaluationRounds, councils, criteriaSets, currentUser, onOpenCreate, onFinalize }: any) {
+function RolesManagementView({ roles, onAdd, onEdit, onDelete }: any) {
+  const permissionNames = new Map(ROLE_PERMISSION_OPTIONS.map(permission => [permission.code, permission.name]));
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900">Vai trò & quyền</h2>
+          <p className="mt-1 text-xs text-slate-500">Quyền cấu hình ở đây được kiểm tra lại tại API.</p>
+        </div>
+        <button type="button" onClick={onAdd} className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700"><Plus className="h-4 w-4" />Tạo vai trò</button>
+      </div>
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <table className="w-full text-left">
+          <thead><tr className="border-b bg-slate-50 text-xs font-semibold text-slate-600"><th className="px-4 py-3">Vai trò</th><th className="px-4 py-3">Quyền</th><th className="px-4 py-3 text-right">Thao tác</th></tr></thead>
+          <tbody className="divide-y text-sm">
+            {roles.map((role: any) => <tr key={role.code}>
+              <td className="px-4 py-3 align-top"><p className="font-semibold text-slate-900">{role.name}</p><p className="mt-1 font-mono text-[11px] text-slate-500">{role.code}</p><p className="mt-1 text-xs text-slate-500">{role.description}</p></td>
+              <td className="px-4 py-3 align-top text-xs text-slate-700">{role.permissions?.includes('*') ? 'Toàn quyền' : role.permissions?.map((code: string) => permissionNames.get(code) || code).join(' · ') || 'Không có quyền'}</td>
+              <td className="px-4 py-3 align-top"><div className="flex justify-end gap-2">
+                {role.code !== 'ADMIN' && <button type="button" title="Sửa quyền" onClick={() => onEdit(role)} className="rounded-lg p-2 text-indigo-600 hover:bg-indigo-50"><Edit className="h-4 w-4" /></button>}
+                {!role.protected && <button type="button" title="Xóa vai trò" onClick={() => onDelete(role)} className="rounded-lg p-2 text-rose-600 hover:bg-rose-50"><Trash2 className="h-4 w-4" /></button>}
+              </div></td>
+            </tr>)}
+            {!roles.length && <tr><td colSpan={3} className="px-4 py-8 text-center text-sm text-slate-500">Chưa có vai trò.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function InnovationFieldsView({ fields, onAdd, onEdit, onDelete }: any) {
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900">Quản lý lĩnh vực sáng kiến</h2>
+          <p className="mt-1 text-xs text-slate-500">Lĩnh vực đang được sáng kiến sử dụng sẽ không thể xóa.</p>
+        </div>
+        <button type="button" onClick={onAdd} className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700"><Plus className="w-4 h-4" />Thêm lĩnh vực</button>
+      </div>
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <table className="w-full text-left">
+          <thead><tr className="border-b bg-slate-50 text-xs font-semibold text-slate-600"><th className="px-4 py-3">Tên lĩnh vực</th><th className="px-4 py-3 text-right">Thao tác</th></tr></thead>
+          <tbody className="divide-y text-sm">
+            {fields.map((field: any) => <tr key={field.id}>
+              <td className="px-4 py-3 font-medium text-slate-800">{field.name}</td>
+              <td className="px-4 py-3"><div className="flex justify-end gap-2">
+                <button type="button" title="Sửa lĩnh vực" onClick={() => onEdit(field)} className="rounded-lg p-2 text-indigo-600 hover:bg-indigo-50"><Edit className="w-4 h-4" /></button>
+                <button type="button" title="Xóa lĩnh vực" onClick={() => onDelete(field)} className="rounded-lg p-2 text-rose-600 hover:bg-rose-50"><Trash2 className="w-4 h-4" /></button>
+              </div></td>
+            </tr>)}
+            {!fields.length && <tr><td colSpan={2} className="px-4 py-8 text-center text-sm text-slate-500">Chưa có lĩnh vực.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function RoundsView({ evaluationRounds, currentUser, canManage, onOpenCreate, onEdit, onDelete, onFinalize }: any) {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-xl font-bold text-slate-900">Đợt xét Sáng kiến & Chốt dữ liệu đơn vị</h2>
-          {currentUser?.roles?.includes('WARD_ADMIN') && <p className="text-xs text-indigo-600 font-medium">Bạn đang quản lý với tư cách Admin Xã Phường</p>}
+          {canManage && !currentUser?.roles?.includes('ADMIN') && <p className="text-xs text-indigo-600 font-medium">Bạn đang quản lý trong phạm vi đơn vị của mình</p>}
         </div>
-        <button onClick={onOpenCreate} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700">Tạo đợt xét cho đơn vị</button>
+        {canManage && <button onClick={onOpenCreate} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700">Tạo đợt xét cho đơn vị</button>}
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {evaluationRounds.map((er: any) => (
@@ -844,11 +1427,17 @@ function RoundsView({ evaluationRounds, councils, criteriaSets, currentUser, onO
             </div>
             <h3 className="text-base font-bold text-slate-900">{er.name}</h3>
             <p className="text-xs text-slate-500">Đơn vị: <strong>{er.department?.name}</strong> • Hội đồng: {er.council?.name}</p>
-            {!er.isScoringFinalized && (
+            {canManage && (
               <div className="pt-2 border-t flex justify-end">
-                <button onClick={() => onFinalize(er.id)} className="px-3 py-1.5 bg-emerald-600 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 hover:bg-emerald-700">
-                  <Lock className="w-3.5 h-3.5" /> Chốt dữ liệu đợt xét của đơn vị
-                </button>
+                <div className="flex flex-wrap justify-end gap-2">
+                  {!er.isScoringFinalized && <>
+                    <button onClick={() => onEdit(er)} className="px-3 py-1.5 border border-indigo-200 text-indigo-700 rounded-lg text-xs font-semibold hover:bg-indigo-50"><Edit className="w-3.5 h-3.5 inline mr-1" />Sửa</button>
+                    <button onClick={() => onFinalize(er.id)} className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 hover:bg-emerald-700">
+                      <Lock className="w-3.5 h-3.5" /> Duyệt dữ liệu
+                    </button>
+                  </>}
+                  <button onClick={() => onDelete(er)} className="px-3 py-1.5 border border-rose-200 text-rose-700 rounded-lg text-xs font-semibold hover:bg-rose-50"><Trash2 className="w-3.5 h-3.5 inline mr-1" />Xóa</button>
+                </div>
               </div>
             )}
           </div>
@@ -858,12 +1447,12 @@ function RoundsView({ evaluationRounds, councils, criteriaSets, currentUser, onO
   );
 }
 
-function CouncilsView({ councils, onOpenAdd, onOpenMembers, onEdit, onDelete }: any) {
+function CouncilsView({ councils, canManage, onOpenAdd, onOpenMembers, onEdit, onDelete }: any) {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-xl font-bold text-slate-900">Quản lý Hội đồng Xét duyệt</h2>
-        <button onClick={onOpenAdd} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700">Thêm Hội đồng</button>
+        {canManage && <button onClick={onOpenAdd} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700">Thêm Hội đồng</button>}
       </div>
       <div className="space-y-4">
         {councils.map((c: any) => (
@@ -875,8 +1464,8 @@ function CouncilsView({ councils, onOpenAdd, onOpenMembers, onEdit, onDelete }: 
             </div>
             <div className="flex items-center space-x-2">
               <button onClick={() => onOpenMembers(c)} className="px-3 py-1.5 bg-indigo-50 text-indigo-700 rounded-lg text-xs font-semibold flex items-center gap-1"><Users className="w-4 h-4" /> Thành viên</button>
-              <button onClick={() => onEdit(c)} className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg"><Edit className="w-4 h-4" /></button>
-              <button onClick={() => onDelete(c.id)} className="p-2 text-rose-600 hover:bg-rose-50 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+              {canManage && <button onClick={() => onEdit(c)} className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg"><Edit className="w-4 h-4" /></button>}
+              {canManage && <button onClick={() => onDelete(c.id)} className="p-2 text-rose-600 hover:bg-rose-50 rounded-lg"><Trash2 className="w-4 h-4" /></button>}
             </div>
           </div>
         ))}
@@ -885,46 +1474,272 @@ function CouncilsView({ councils, onOpenAdd, onOpenMembers, onEdit, onDelete }: 
   );
 }
 
-function ScoringView({ evaluationRounds, assignments, currentUser, councils, scoringSheets, onOpenScoring }: any) {
-  const [selectedRoundId, setSelectedRoundId] = useState(evaluationRounds[0]?.id || '');
+function ScoringView({ evaluationRounds, assignments, currentUser, canManageAssignments, canViewAllScores: roleCanViewAllScores, councils, innovations, scoringSheets, onOpenScoring, onCreateAssignment, onFinalize }: any) {
+  const [selectedRoundId, setSelectedRoundId] = useState('');
+  const [selectedInnovationId, setSelectedInnovationId] = useState('');
+  const [assignmentForm, setAssignmentForm] = useState({ innovationIds: [] as string[], userIds: [] as string[], deadline: '' });
+  const [assignmentError, setAssignmentError] = useState('');
+  useEffect(() => {
+    setSelectedRoundId((currentId: string) => {
+      if (evaluationRounds.some((round: any) => round.id === currentId)) return currentId;
+      const canViewAll = currentUser?.roles?.includes('ADMIN') || roleCanViewAllScores;
+      const roundWithAssignments = evaluationRounds.find((round: any) =>
+        assignments.some((assignment: any) =>
+          assignment.evaluationRoundId === round.id && (canViewAll || assignment.userId === currentUser?.id)
+        )
+      );
+      return roundWithAssignments?.id || evaluationRounds[0]?.id || '';
+    });
+  }, [evaluationRounds, assignments, currentUser?.id, currentUser?.roles]);
+
   const selectedRound = evaluationRounds.find((er: any) => er.id === selectedRoundId);
+  const selectedCouncil = councils.find((council: any) => council.id === selectedRound?.councilId);
+  const councilMembers = (selectedCouncil?.members || []).filter((member: any) => member.isActive !== false && member.user);
+  const isAdmin = currentUser?.roles?.includes('ADMIN');
+  const isCouncilChair = councilMembers.some((member: any) => member.userId === currentUser?.id && member.councilRole === 'CHAIRMAN');
+  const canViewAllScores = isAdmin || roleCanViewAllScores || isCouncilChair;
+  const allRoundInnovations = innovations.filter((innovation: any) => innovation.evaluationRoundId === selectedRoundId);
+  const roundInnovations = allRoundInnovations.filter((innovation: any) =>
+    (canViewAllScores || assignments.some((assignment: any) => assignment.evaluationRoundId === selectedRoundId && assignment.innovationId === innovation.id && assignment.userId === currentUser?.id))
+  );
+  const selectedInnovation = roundInnovations.find((innovation: any) => innovation.id === selectedInnovationId);
+  const innovationAssignments = assignments.filter((assignment: any) =>
+    assignment.evaluationRoundId === selectedRoundId &&
+    assignment.innovationId === selectedInnovationId &&
+    (canViewAllScores || assignment.userId === currentUser?.id)
+  );
+  const scoringRows = innovationAssignments.map((assignment: any) => ({
+    assignment,
+    sheet: scoringSheets.find((item: any) => item.assignmentId === assignment.id && item.userId === assignment.userId),
+  }));
+  const submittedScores = scoringRows.filter((row: any) => row.sheet?.status === 'SUBMITTED').map((row: any) => Number(row.sheet.totalScore));
+  const averageScore = canViewAllScores && submittedScores.length
+    ? Math.round(submittedScores.reduce((sum: number, score: number) => sum + score, 0) / submittedScores.length * 100) / 100
+    : null;
+  const ownSheet = scoringRows.find((row: any) => row.assignment.userId === currentUser?.id)?.sheet;
   const roundAssignments = assignments.filter((a: any) => a.evaluationRoundId === selectedRoundId && (a.userId === currentUser.id || currentUser.roles?.includes('ADMIN')));
+
+  useEffect(() => {
+    setAssignmentForm((current: any) => ({
+      innovationIds: current.innovationIds.filter((id: string) => allRoundInnovations.some((innovation: any) => innovation.id === id)),
+      userIds: current.userIds.filter((id: string) => councilMembers.some((member: any) => member.userId === id)),
+      deadline: current.deadline,
+    }));
+  }, [selectedRoundId, innovations, councils]);
+
+  useEffect(() => {
+    setSelectedInnovationId((currentId: string) =>
+      roundInnovations.some((innovation: any) => innovation.id === currentId)
+        ? currentId
+        : roundInnovations[0]?.id || ''
+    );
+  }, [selectedRoundId, innovations, assignments, currentUser?.id, currentUser?.roles]);
+
+  const handleAssignmentSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setAssignmentError('');
+    if (!assignmentForm.innovationIds.length || !assignmentForm.userIds.length) {
+      setAssignmentError('Hãy chọn ít nhất một sáng kiến và một thành viên hội đồng.');
+      return;
+    }
+    try {
+      await onCreateAssignment({
+        ...assignmentForm,
+        evaluationRoundId: selectedRoundId,
+        assignedBy: currentUser.id,
+      });
+    } catch (error: any) {
+      setAssignmentError(error.message);
+    }
+  };
+
+  const handleQuickAssignment = async () => {
+    setAssignmentError('');
+    try {
+      await onCreateAssignment({
+        ...assignmentForm,
+        evaluationRoundId: selectedRoundId,
+        assignedBy: currentUser.id,
+        innovationIds: allRoundInnovations.map((innovation: any) => innovation.id),
+        userIds: councilMembers.map((member: any) => member.userId),
+      });
+    } catch (error: any) {
+      setAssignmentError(error.message);
+    }
+  };
 
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-xl font-bold text-slate-900">Chấm điểm Hội đồng theo Đợt xét</h2>
-        <select className="border rounded-xl px-3 py-1.5 text-sm font-semibold bg-white text-indigo-600" value={selectedRoundId} onChange={e => setSelectedRoundId(e.target.value)}>
+        <div className="flex items-center gap-2">
+          <select className="border rounded-xl px-3 py-1.5 text-sm font-semibold bg-white text-indigo-600" value={selectedRoundId} onChange={e => setSelectedRoundId(e.target.value)}>
+            {!evaluationRounds.length && <option value="">Chưa có đợt xét</option>}
           {evaluationRounds.map((er: any) => <option key={er.id} value={er.id}>{er.name} ({er.department?.name})</option>)}
-        </select>
+          </select>
+          {canManageAssignments && <button type="button" onClick={() => onFinalize(selectedRoundId)} disabled={!selectedRoundId || selectedRound?.isScoringFinalized} className="px-3 py-2 rounded-lg bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800 disabled:bg-slate-300 disabled:cursor-not-allowed">{selectedRound?.isScoringFinalized ? 'Đã duyệt toàn đợt' : 'Duyệt dữ liệu toàn đợt'}</button>}
+        </div>
       </div>
       {selectedRound?.isScoringFinalized && (
         <div className="p-4 bg-purple-50 border border-purple-200 rounded-xl text-xs text-purple-800 font-semibold">🔒 Đợt xét của đơn vị này đã chốt dữ liệu.</div>
       )}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {roundAssignments.map((asg: any) => {
-          const sheet = scoringSheets.find((ss: any) => ss.assignmentId === asg.id && ss.userId === currentUser.id);
-          return (
-            <div key={asg.id} className="p-5 border rounded-2xl bg-white space-y-3 shadow-xs">
-              <h3 className="text-base font-bold text-slate-900">{asg.innovation?.title}</h3>
-              {sheet && <p className="text-xs font-bold text-emerald-600">Đã chấm: {sheet.totalScore}đ</p>}
-              <div className="pt-2 border-t flex justify-end">
-                <button onClick={() => onOpenScoring(asg)} disabled={selectedRound?.isScoringFinalized} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-semibold hover:bg-indigo-700">Chấm điểm</button>
+      {canManageAssignments && (
+        <form onSubmit={handleAssignmentSubmit} className="border border-slate-200 rounded-xl bg-slate-50 p-4 space-y-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900">Phân công chấm</h3>
+            <p className="text-xs text-slate-500 mt-1">Chọn sáng kiến và thành viên thuộc hội đồng của đợt xét đang mở.</p>
+          </div>
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+            <section className="rounded-lg border border-slate-200 bg-white">
+              <div className="flex items-center justify-between border-b px-3 py-2">
+                <span className="text-xs font-semibold text-slate-700">Sáng kiến ({assignmentForm.innovationIds.length} đã chọn)</span>
+                <label className="flex items-center gap-2 text-xs text-indigo-700">
+                  <input type="checkbox" checked={allRoundInnovations.length > 0 && assignmentForm.innovationIds.length === allRoundInnovations.length} onChange={e => setAssignmentForm({ ...assignmentForm, innovationIds: e.target.checked ? allRoundInnovations.map((innovation: any) => innovation.id) : [] })} disabled={!allRoundInnovations.length || selectedRound?.isScoringFinalized} />
+                  Chọn tất cả
+                </label>
+              </div>
+              <div className="max-h-48 divide-y overflow-y-auto">
+                {allRoundInnovations.map((innovation: any) => <label key={innovation.id} className="flex cursor-pointer items-start gap-2 px-3 py-2 hover:bg-slate-50">
+                  <input type="checkbox" className="mt-0.5" checked={assignmentForm.innovationIds.includes(innovation.id)} onChange={e => setAssignmentForm({ ...assignmentForm, innovationIds: e.target.checked ? [...assignmentForm.innovationIds, innovation.id] : assignmentForm.innovationIds.filter(id => id !== innovation.id) })} disabled={selectedRound?.isScoringFinalized} />
+                  <span className="text-xs text-slate-700"><strong className="font-mono text-slate-500">{innovation.code}</strong> · {innovation.title}</span>
+                </label>)}
+                {!allRoundInnovations.length && <p className="px-3 py-5 text-center text-xs text-slate-500">Đợt này chưa có sáng kiến.</p>}
+              </div>
+            </section>
+            <section className="rounded-lg border border-slate-200 bg-white">
+              <div className="flex items-center justify-between border-b px-3 py-2">
+                <span className="text-xs font-semibold text-slate-700">Thành viên hội đồng ({assignmentForm.userIds.length} đã chọn)</span>
+                <label className="flex items-center gap-2 text-xs text-indigo-700">
+                  <input type="checkbox" checked={councilMembers.length > 0 && assignmentForm.userIds.length === councilMembers.length} onChange={e => setAssignmentForm({ ...assignmentForm, userIds: e.target.checked ? councilMembers.map((member: any) => member.userId) : [] })} disabled={!councilMembers.length || selectedRound?.isScoringFinalized} />
+                  Chọn tất cả
+                </label>
+              </div>
+              <div className="max-h-48 divide-y overflow-y-auto">
+                {councilMembers.map((member: any) => <label key={member.id} className="flex cursor-pointer items-start gap-2 px-3 py-2 hover:bg-slate-50">
+                  <input type="checkbox" className="mt-0.5" checked={assignmentForm.userIds.includes(member.userId)} onChange={e => setAssignmentForm({ ...assignmentForm, userIds: e.target.checked ? [...assignmentForm.userIds, member.userId] : assignmentForm.userIds.filter(id => id !== member.userId) })} disabled={selectedRound?.isScoringFinalized} />
+                  <span className="text-xs text-slate-700">{member.user.fullName} <span className="text-slate-500">({member.councilRole})</span></span>
+                </label>)}
+                {!councilMembers.length && <p className="px-3 py-5 text-center text-xs text-slate-500">Hội đồng chưa có thành viên.</p>}
+              </div>
+            </section>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs text-slate-600">
+              <label htmlFor="assignment-deadline">Hạn chấm</label>
+              <input id="assignment-deadline" type="date" className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm" value={assignmentForm.deadline} onChange={e => setAssignmentForm({ ...assignmentForm, deadline: e.target.value })} disabled={selectedRound?.isScoringFinalized} />
+              <span>{assignmentForm.innovationIds.length * assignmentForm.userIds.length} lượt trước khi loại tác giả và phân công trùng</span>
+            </div>
+            <div className="flex gap-2">
+              <button type="submit" disabled={!assignmentForm.innovationIds.length || !assignmentForm.userIds.length || selectedRound?.isScoringFinalized} className="rounded-lg border border-indigo-600 px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:border-slate-300 disabled:text-slate-400">Giao theo lựa chọn</button>
+              <button type="button" onClick={handleQuickAssignment} disabled={!allRoundInnovations.length || !councilMembers.length || selectedRound?.isScoringFinalized} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300">Giao nhanh toàn bộ</button>
+            </div>
+          </div>
+          {assignmentError && <p className="text-xs text-rose-600">{assignmentError}</p>}
+          <div className="flex justify-end">
+            <div className="flex gap-2">
+              <button type="submit" disabled={!assignmentForm.innovationId || !assignmentForm.userId || !eligibleCouncilMembers.length || selectedRound?.isScoringFinalized} className="px-4 py-2 border border-indigo-600 text-indigo-700 rounded-lg text-sm font-semibold hover:bg-indigo-50 disabled:border-slate-300 disabled:text-slate-400 disabled:cursor-not-allowed">Giao một người</button>
+              <button type="button" onClick={handleQuickAssignment} disabled={!assignmentForm.innovationId || !eligibleCouncilMembers.length || selectedRound?.isScoringFinalized} className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed">Giao nhanh cho cả hội đồng</button>
+            </div>
+          </div>
+        </form>
+      )}
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(260px,0.85fr)_minmax(0,1.6fr)] gap-5 items-start">
+        <section className="border border-slate-200 rounded-xl bg-white overflow-hidden">
+          <div className="px-4 py-3 border-b bg-slate-50">
+            <h3 className="text-sm font-bold text-slate-900">Sáng kiến trong đợt</h3>
+            <p className="text-xs text-slate-500 mt-1">{roundInnovations.length} sáng kiến</p>
+          </div>
+          <div className="divide-y max-h-[70vh] overflow-y-auto">
+            {roundInnovations.map((innovation: any) => {
+              const assignmentCount = canViewAllScores ? assignments.filter((assignment: any) => assignment.evaluationRoundId === selectedRoundId && assignment.innovationId === innovation.id).length : null;
+              const isSelected = innovation.id === selectedInnovationId;
+              return <button key={innovation.id} type="button" onClick={() => setSelectedInnovationId(innovation.id)} className={`w-full text-left px-4 py-3 hover:bg-slate-50 ${isSelected ? 'bg-indigo-50 border-l-4 border-indigo-600' : ''}`}>
+                <span className="block text-xs font-mono text-slate-500">{innovation.code}</span>
+                <span className="block mt-1 text-sm font-semibold text-slate-900">{innovation.title}</span>
+                {canViewAllScores && <span className="block mt-2 text-xs text-slate-500">Đã giao {assignmentCount} người chấm</span>}
+              </button>;
+            })}
+            {!roundInnovations.length && <p className="px-4 py-8 text-center text-sm text-slate-500">{canViewAllScores ? 'Đợt này chưa có sáng kiến.' : 'Bạn chưa được phân công sáng kiến nào trong đợt này.'}</p>}
+          </div>
+        </section>
+
+        <section className="border border-slate-200 rounded-xl bg-white overflow-hidden">
+          {selectedInnovation ? <>
+            <div className="px-5 py-4 border-b bg-slate-50 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-mono text-slate-500">{selectedInnovation.code}</p>
+                <h3 className="mt-1 text-base font-bold text-slate-900">{selectedInnovation.title}</h3>
+              </div>
+              <div className="text-right">
+                {canViewAllScores ? <>
+                  <p className="text-xs text-slate-500">Điểm trung bình đã gửi ({submittedScores.length} phiếu)</p>
+                  <p className="text-2xl font-bold text-indigo-700">{averageScore === null ? '--' : `${averageScore} điểm`}</p>
+                </> : <>
+                  <p className="text-xs text-slate-500">Điểm của tôi</p>
+                  <p className="text-2xl font-bold text-indigo-700">{ownSheet ? `${ownSheet.totalScore} điểm` : '--'}</p>
+                </>}
               </div>
             </div>
-          );
-        })}
+            <div className="overflow-x-auto">
+              <table className="w-full text-left">
+                <thead><tr className="border-b bg-white text-xs text-slate-500">{canViewAllScores && <th className="px-4 py-3 font-semibold">Thành viên hội đồng</th>}<th className="px-4 py-3 font-semibold">Trạng thái</th><th className="px-4 py-3 font-semibold">Điểm</th><th className="px-4 py-3 text-right font-semibold">Thao tác</th></tr></thead>
+                <tbody className="divide-y">
+                  {scoringRows.map(({ assignment, sheet }: any) => <tr key={assignment.id}>
+                    {canViewAllScores && <td className="px-4 py-3 text-sm font-medium text-slate-800">{assignment.user?.fullName || assignment.userId}</td>}
+                    <td className="px-4 py-3 text-xs">{sheet?.status === 'SUBMITTED' ? <span className="text-emerald-700 font-semibold">Đã gửi</span> : sheet ? <span className="text-amber-700 font-semibold">Bản nháp</span> : <span className="text-slate-500">Chưa chấm</span>}</td>
+                    <td className="px-4 py-3 text-sm font-bold text-slate-900">{sheet ? `${sheet.totalScore} điểm` : '--'}</td>
+                    <td className="px-4 py-3 text-right">{assignment.userId === currentUser.id && <button type="button" onClick={() => onOpenScoring(assignment)} disabled={selectedRound?.isScoringFinalized} className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed">{sheet ? 'Sửa phiếu' : 'Chấm điểm'}</button>}</td>
+                  </tr>)}
+                  {!scoringRows.length && <tr><td colSpan={canViewAllScores ? 4 : 3} className="px-4 py-8 text-center text-sm text-slate-500">Chưa có phiếu chấm của bạn cho sáng kiến này.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </> : <p className="px-5 py-12 text-center text-sm text-slate-500">Chọn sáng kiến bên trái để xem điểm hội đồng.</p>}
+        </section>
       </div>
     </div>
   );
 }
 
-function RankingView({ innovations, rankingRules }: any) {
+function RankingView({ innovations, rankingRules, evaluationRounds }: any) {
+  const [selectedRoundId, setSelectedRoundId] = useState('');
+  const filteredInnovations = innovations.filter((innovation: any) => !selectedRoundId || innovation.evaluationRoundId === selectedRoundId);
+  const exportToExcel = async () => {
+    const XLSX = await import('xlsx');
+    const rows = filteredInnovations.map((innovation: any, index: number) => ({
+      'STT': index + 1,
+      'Mã sáng kiến': innovation.code || '',
+      'Tên sáng kiến': innovation.title || '',
+      'Đợt xét': innovation.evaluationRound?.name || '',
+      'Năm': innovation.evaluationRound?.year || '',
+      'Đơn vị': innovation.evaluationRound?.department?.name || '',
+      'Điểm trung bình': innovation.averageScore ?? '',
+      'Xếp loại': innovation.rankResult || '',
+    }));
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Xep loai');
+    const selectedRound = evaluationRounds.find((round: any) => round.id === selectedRoundId);
+    const suffix = selectedRound ? `-${selectedRound.code.replace(/[^a-zA-Z0-9_-]/g, '_')}` : '';
+    XLSX.writeFile(workbook, `thong-ke-xep-loai${suffix}.xlsx`);
+  };
+
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-bold text-slate-900">Xếp loại & Thống kê Điểm số</h2>
-        <p className="text-xs text-slate-500 mt-0.5">Phân loại dựa trên cấu hình ngưỡng điểm động.</p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900">Xếp loại & Thống kê Điểm số</h2>
+          <p className="text-xs text-slate-500 mt-0.5">Phân loại dựa trên cấu hình ngưỡng điểm động. {filteredInnovations.length} sáng kiến.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm" value={selectedRoundId} onChange={e => setSelectedRoundId(e.target.value)}>
+            <option value="">Tất cả đợt xét</option>
+            {evaluationRounds.map((round: any) => <option key={round.id} value={round.id}>{round.name}</option>)}
+          </select>
+          <button type="button" onClick={exportToExcel} disabled={!filteredInnovations.length} className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-slate-300">
+            <Download className="h-4 w-4" /> Xuất Excel
+          </button>
+        </div>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         {rankingRules.map((rr: any, idx: number) => (
@@ -938,12 +1753,91 @@ function RankingView({ innovations, rankingRules }: any) {
         <table className="w-full text-left border-collapse">
           <thead><tr className="bg-slate-50 text-xs font-semibold text-slate-600 border-b"><th className="p-4">Sáng kiến</th><th className="p-4">Đơn vị</th><th className="p-4">Điểm TB</th><th className="p-4">Xếp loại</th></tr></thead>
           <tbody className="divide-y text-sm text-slate-700">
-            {innovations.map((inv: any) => (
+            {filteredInnovations.map((inv: any) => (
               <tr key={inv.id} className="hover:bg-slate-50">
                 <td className="p-4 font-semibold text-slate-900">{inv.title}</td>
                 <td className="p-4">{inv.evaluationRound?.department?.name}</td>
                 <td className="p-4 font-bold text-indigo-600">{inv.averageScore !== null ? `${inv.averageScore}đ` : 'Chưa có'}</td>
                 <td className="p-4"><span className="px-3 py-1 bg-purple-100 text-purple-800 text-xs font-bold rounded-full">{inv.rankResult}</span></td>
+              </tr>
+            ))}
+            {!filteredInnovations.length && <tr><td colSpan={4} className="p-8 text-center text-sm text-slate-500">Không có dữ liệu cho đợt xét này.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function RepositoryView({ innovations }: any) {
+  const [query, setQuery] = useState('');
+  const [selectedField, setSelectedField] = useState('');
+  const fields = Array.from(new Set(innovations.map((innovation: any) => innovation.field).filter(Boolean))) as string[];
+  const normalizeSearch = (value: any) => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[đĐ]/g, 'd').toLocaleLowerCase('vi');
+  const filteredInnovations = innovations.filter((innovation: any) => {
+    const authorNames = (innovation.authors || []).map((author: any) => author.fullName).join(' ');
+    const searchableText = [innovation.title, innovation.field, innovation.solutionDescription, authorNames, innovation.submitter?.fullName].join(' ');
+    return (!selectedField || innovation.field === selectedField) && normalizeSearch(searchableText).includes(normalizeSearch(query));
+  });
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900">Kho Tra Cứu Sáng Kiến</h2>
+          <p className="mt-1 text-xs text-slate-500">{filteredInnovations.length} / {innovations.length} sáng kiến</p>
+        </div>
+        <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-[minmax(260px,1fr)_220px] sm:w-auto">
+          <label className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3">
+            <Search className="h-4 w-4 shrink-0 text-slate-400" />
+            <input className="min-w-0 w-full py-2 text-sm outline-none" value={query} onChange={e => setQuery(e.target.value)} placeholder="Tìm tên, tác giả, nội dung..." />
+          </label>
+          <select className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm" value={selectedField} onChange={e => setSelectedField(e.target.value)}>
+            <option value="">Tất cả lĩnh vực</option>
+            {fields.map(field => <option key={field} value={field}>{field}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {filteredInnovations.map((inv: any) => (
+          <div key={inv.id} className="p-5 border rounded-2xl bg-white space-y-2">
+            <span className="text-xs font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full">{inv.field}</span>
+            <h3 className="text-base font-bold text-slate-900">{inv.title}</h3>
+            <p className="text-xs font-medium text-slate-500">Tác giả: {(inv.authors || []).map((author: any) => author.fullName).filter(Boolean).join(', ') || inv.submitter?.fullName || 'Chưa cập nhật'}</p>
+            <p className="text-xs text-slate-600">{inv.solutionDescription}</p>
+          </div>
+        ))}
+        {!filteredInnovations.length && <p className="col-span-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">Không tìm thấy sáng kiến phù hợp.</p>}
+      </div>
+    </div>
+  );
+}
+
+function DepartmentsView({ departments, canManage, onOpenAdd, onEdit, onDelete }: any) {
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-bold text-slate-900">Quản lý Xã/Phường và phòng trực thuộc</h2>
+        {canManage && <button onClick={onOpenAdd} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 flex items-center gap-2">
+          <Plus className="w-4 h-4" /> Thêm đơn vị
+        </button>}
+      </div>
+      <div className="border rounded-2xl overflow-hidden bg-white">
+        <table className="w-full text-left border-collapse">
+          <thead><tr className="bg-slate-50 text-xs font-semibold text-slate-600 border-b"><th className="p-4">Mã</th><th className="p-4">Tên đơn vị</th><th className="p-4">Đơn vị cấp trên</th><th className="p-4">Loại cơ cấu</th><th className="p-4 text-right">Thao tác</th></tr></thead>
+          <tbody className="divide-y text-sm text-slate-700">
+            {departments.map((d: any) => (
+              <tr key={d.id}>
+                <td className="p-4 font-mono">{d.code}</td>
+                <td className="p-4 font-semibold">{d.name}</td>
+                <td className="p-4 text-slate-600">{departments.find((parent: any) => parent.id === d.parentId)?.name || 'Không có'}</td>
+                <td className="p-4"><span className="px-2 py-0.5 bg-indigo-50 text-indigo-700 rounded text-xs font-bold">{{ XA_PHUONG: 'Xã / Phường', PHONG_BAN_XA_PHUONG: 'Phòng thuộc xã / phường' }[d.type as 'XA_PHUONG' | 'PHONG_BAN_XA_PHUONG'] || d.type}</span></td>
+                {canManage && <td className="p-4">
+                  <div className="flex justify-end gap-2">
+                    <button onClick={() => onEdit(d)} className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg"><Edit className="w-4 h-4" /></button>
+                    <button onClick={() => onDelete(d.id)} className="p-2 text-rose-600 hover:bg-rose-50 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+                  </div>
+                </td>}
               </tr>
             ))}
           </tbody>
@@ -953,51 +1847,21 @@ function RankingView({ innovations, rankingRules }: any) {
   );
 }
 
-function RepositoryView({ innovations }: any) {
+function UsersManagementView({ users, departments, canManage = true, roleCatalog, onOpenAdd, onEdit, onDelete }: any) {
   return (
     <div className="space-y-6">
-      <h2 className="text-xl font-bold text-slate-900">Kho Tra Cứu Sáng Kiến</h2>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {innovations.map((inv: any) => (
-          <div key={inv.id} className="p-5 border rounded-2xl bg-white space-y-2">
-            <span className="text-xs font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full">{inv.field}</span>
-            <h3 className="text-base font-bold text-slate-900">{inv.title}</h3>
-            <p className="text-xs text-slate-600">{inv.solutionDescription}</p>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function DepartmentsView({ departments }: any) {
-  return (
-    <div className="space-y-6">
-      <h2 className="text-xl font-bold text-slate-900">Quản lý Đơn vị (Xã/Phường & Phòng ban)</h2>
-      <div className="border rounded-2xl overflow-hidden bg-white">
-        <table className="w-full text-left border-collapse">
-          <thead><tr className="bg-slate-50 text-xs font-semibold text-slate-600 border-b"><th className="p-4">Mã</th><th className="p-4">Tên đơn vị / Xã phường</th><th className="p-4">Loại cơ cấu</th></tr></thead>
-          <tbody className="divide-y text-sm text-slate-700">
-            {departments.map((d: any) => (
-              <tr key={d.id}><td className="p-4 font-mono">{d.code}</td><td className="p-4 font-semibold">{d.name}</td><td className="p-4"><span className="px-2 py-0.5 bg-indigo-50 text-indigo-700 rounded text-xs font-bold">{d.type}</span></td></tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function UsersManagementView({ users, departments }: any) {
-  return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-bold text-slate-900">Quản lý Người dùng & Admin Xã Phường</h2>
-        <p className="text-xs text-slate-500 mt-0.5">Mỗi xã phường có tài khoản Quản trị xã (WARD_ADMIN) độc lập.</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900">Quản lý Người dùng & Admin Xã Phường</h2>
+          <p className="text-xs text-slate-500 mt-0.5">Mỗi xã phường có tài khoản Quản trị xã (WARD_ADMIN) độc lập.</p>
+        </div>
+        {canManage && <button onClick={onOpenAdd} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 flex items-center gap-2">
+          <Plus className="w-4 h-4" /> Thêm người dùng
+        </button>}
       </div>
       <div className="border rounded-2xl overflow-hidden bg-white">
         <table className="w-full text-left border-collapse">
-          <thead><tr className="bg-slate-50 text-xs font-semibold text-slate-600 border-b"><th className="p-4">Họ tên</th><th className="p-4">Username</th><th className="p-4">Đơn vị</th><th className="p-4">Vai trò</th></tr></thead>
+          <thead><tr className="bg-slate-50 text-xs font-semibold text-slate-600 border-b"><th className="p-4">Họ tên</th><th className="p-4">Username</th><th className="p-4">Đơn vị</th><th className="p-4">Vai trò</th><th className="p-4 text-right">Thao tác</th></tr></thead>
           <tbody className="divide-y text-sm text-slate-700">
             {users.map((u: any) => {
               const dept = departments.find((d: any) => d.id === u.departmentId);
@@ -1005,8 +1869,14 @@ function UsersManagementView({ users, departments }: any) {
                 <tr key={u.id}>
                   <td className="p-4 font-semibold">{u.fullName}</td>
                   <td className="p-4 font-mono">@{u.username}</td>
-                  <td className="p-4">{dept?.name || 'Cấp huyện'}</td>
+                  <td className="p-4">{dept?.name || 'Chưa gán đơn vị'}</td>
                   <td className="p-4"><span className="px-2 py-0.5 bg-purple-100 text-purple-800 text-xs font-bold rounded">{u.roles.join(', ')}</span></td>
+                  <td className="p-4">
+                    <div className="flex justify-end gap-2">
+                      {canManage && <button onClick={() => onEdit(u)} className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg"><Edit className="w-4 h-4" /></button>}
+                      {canManage && <button onClick={() => onDelete(u.id)} className="p-2 text-rose-600 hover:bg-rose-50 rounded-lg"><Trash2 className="w-4 h-4" /></button>}
+                    </div>
+                  </td>
                 </tr>
               );
             })}
